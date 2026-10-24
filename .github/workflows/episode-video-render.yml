@@ -1,0 +1,77 @@
+name: Episode video render
+
+# Renders episode videos on GitHub's own servers: the show's background looping
+# under the episode's audio, with the captions burned in, in 16:9 and 9:16.
+# The finished files are published as a release of this repository, and the app
+# collects them from there. Nothing runs on your computer.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: episode-video-render
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    env:
+      APP: https://wise-investments-podcast.base44.app/functions/episodeVideoRender
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Ask the app which episode needs a video
+        id: queue
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST "$APP" -H 'Content-Type: application/json' -d '{"action":"queue","limit":1}' -o queue.json
+          cat queue.json
+          HAS_JOB=$(jq -r 'if (.jobs | length) > 0 then "yes" else "no" end' queue.json)
+          echo "has_job=$HAS_JOB" >> "$GITHUB_OUTPUT"
+
+      - name: Install a Hebrew capable font
+        if: steps.queue.outputs.has_job == 'yes'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-core
+
+      - name: Render the episode and publish the files
+        if: steps.queue.outputs.has_job == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG=$(jq -r '.jobs[0].release_tag' queue.json)
+          TITLE=$(jq -r '.jobs[0].title' queue.json)
+          DURATION=$(jq -r '.jobs[0].duration_seconds' queue.json)
+          AUDIO=$(jq -r '.jobs[0].audio_url' queue.json)
+          BACKGROUND=$(jq -r '.jobs[0].background_url' queue.json)
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "This episode already has a rendered release ($TAG) - nothing to do."
+            exit 0
+          fi
+
+          jq -r '.jobs[0].srt' queue.json > captions.srt
+          curl -fsSL "$AUDIO" -o episode-audio.mp3
+          curl -fsSL "$BACKGROUND" -o background.mp4
+
+          STYLE="FontName=Noto Sans Hebrew,FontSize=26,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=8,Shadow=0,Alignment=2,MarginV=150"
+          VSTYLE="FontName=Noto Sans Hebrew,FontSize=42,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=10,Shadow=0,Alignment=2,MarginV=320"
+
+          ffmpeg -y -stream_loop -1 -i background.mp4 -i episode-audio.mp3 \
+            -filter_complex "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30,subtitles=captions.srt:force_style='$STYLE'[v]" \
+            -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -c:a aac -b:a 192k -ar 48000 -movflags +faststart landscape.mp4
+
+          ffmpeg -y -stream_loop -1 -i background.mp4 -i episode-audio.mp3 \
+            -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,subtitles=captions.srt:force_style='$VSTYLE'[v]" \
+            -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -c:a aac -b:a 192k -ar 48000 -movflags +faststart vertical.mp4
+
+          gh release create "$TAG" landscape.mp4 vertical.mp4 captions.srt \
+            --title "$TITLE" \
+            --notes "Episode video: show background, episode audio, burned-in captions (16:9 and 9:16)."
+          echo "Published $TAG"
