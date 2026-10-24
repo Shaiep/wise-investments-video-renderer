@@ -33,11 +33,14 @@ jobs:
           HAS_JOB=$(jq -r 'if (.jobs | length) > 0 then "yes" else "no" end' queue.json)
           echo "has_job=$HAS_JOB" >> "$GITHUB_OUTPUT"
 
-      - name: Install a Hebrew capable font
+     
+      - name: Install FFmpeg and Hebrew fonts
         if: steps.queue.outputs.has_job == 'yes'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq fonts-noto-core
+          sudo apt-get install -y -qq ffmpeg fonts-noto-core
+          ffmpeg -version
+
 
       - name: Render the episode and publish the files
         if: steps.queue.outputs.has_job == 'yes'
