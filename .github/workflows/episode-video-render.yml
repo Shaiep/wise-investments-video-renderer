@@ -63,22 +63,22 @@ jobs:
           curl -fsSL "$BACKGROUND" -o background.mp4
 
           STYLE="FontName=Noto Sans Hebrew,FontSize=18,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=6,Shadow=0,Alignment=2,MarginV=100"
-          # The vertical copy is watched inside Reels and Stories, whose own interface
-          # covers the bottom of the frame — so its captions sit well above it, in the
-          # part of a 9:16 frame that always stays visible.
-          VSTYLE="FontName=Noto Sans Hebrew,FontSize=34,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=8,Shadow=0,Alignment=2,MarginV=420"
+          # MarginV counts subtitle units, not pixels: a frame is always 288 units tall, so
+          # the old 420 was taller than the frame and pushed the line out of the picture.
+          # This keeps the vertical captions in the lower third, above the Reels interface.
+          VSTYLE="FontName=Noto Sans Hebrew,FontSize=20,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=6,Shadow=0,Alignment=2,MarginV=100"
 
           # A modest frame with a hard compression pass: the picture is a soft looping
           # background under a caption, so a smaller frame and a higher CRF cost nothing
           # the viewer can see and cut the file to a fraction of its size — which is what
           # the platforms fetch and what the site serves.
           ffmpeg -y -stream_loop -1 -i background.mp4 -i episode-audio.mp3 \
-            -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,setsar=1,fps=25,subtitles=captions.srt:force_style='$STYLE'[v]" \
-            -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -crf 26 -maxrate 1200k -bufsize 2400k -pix_fmt yuv420p -c:a aac -b:a 96k -ar 44100 -movflags +faststart landscape.mp4
+            -filter_complex "[0:v]scale=960:540:force_original_aspect_ratio=increase,crop=960:540,setsar=1,fps=24,subtitles=captions.srt:force_style='$STYLE'[v]" \
+            -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -crf 30 -maxrate 700k -bufsize 1400k -pix_fmt yuv420p -c:a aac -b:a 64k -ac 1 -ar 44100 -movflags +faststart landscape.mp4
 
           ffmpeg -y -stream_loop -1 -i background.mp4 -i episode-audio.mp3 \
-            -filter_complex "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=25,subtitles=captions.srt:force_style='$VSTYLE'[v]" \
-            -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -crf 26 -maxrate 1200k -bufsize 2400k -pix_fmt yuv420p -c:a aac -b:a 96k -ar 44100 -movflags +faststart vertical.mp4
+            -filter_complex "[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,setsar=1,fps=24,subtitles=captions.srt:force_style='$VSTYLE'[v]" \
+            -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -crf 30 -maxrate 800k -bufsize 1600k -pix_fmt yuv420p -c:a aac -b:a 64k -ac 1 -ar 44100 -movflags +faststart vertical.mp4
 
           gh release create "$TAG" landscape.mp4 vertical.mp4 captions.srt \
             --title "$TITLE" \
