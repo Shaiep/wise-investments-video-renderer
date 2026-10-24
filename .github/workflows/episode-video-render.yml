@@ -33,14 +33,11 @@ jobs:
           HAS_JOB=$(jq -r 'if (.jobs | length) > 0 then "yes" else "no" end' queue.json)
           echo "has_job=$HAS_JOB" >> "$GITHUB_OUTPUT"
 
-     
-      - name: Install FFmpeg and Hebrew fonts
+      - name: Install a Hebrew capable font
         if: steps.queue.outputs.has_job == 'yes'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-noto-core
-          ffmpeg -version
-
+          sudo apt-get install -y -qq fonts-noto-core
 
       - name: Render the episode and publish the files
         if: steps.queue.outputs.has_job == 'yes'
@@ -64,7 +61,10 @@ jobs:
           curl -fsSL "$BACKGROUND" -o background.mp4
 
           STYLE="FontName=Noto Sans Hebrew,FontSize=26,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=8,Shadow=0,Alignment=2,MarginV=150"
-          VSTYLE="FontName=Noto Sans Hebrew,FontSize=42,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=10,Shadow=0,Alignment=2,MarginV=320"
+          # The vertical copy is watched inside Reels and Stories, whose own interface
+          # covers the bottom of the frame — so its captions sit well above it, in the
+          # part of a 9:16 frame that always stays visible.
+          VSTYLE="FontName=Noto Sans Hebrew,FontSize=52,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=12,Shadow=0,Alignment=2,MarginV=760"
 
           ffmpeg -y -stream_loop -1 -i background.mp4 -i episode-audio.mp3 \
             -filter_complex "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30,subtitles=captions.srt:force_style='$STYLE'[v]" \
