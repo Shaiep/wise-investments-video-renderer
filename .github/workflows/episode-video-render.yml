@@ -9,6 +9,10 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
+    inputs:
+      srt:
+        description: 'Optional captions (base64 SRT) that replace the copy the app sends with the job'
+        required: false
 
 permissions:
   contents: write
@@ -45,6 +49,7 @@ jobs:
         if: steps.queue.outputs.has_job == 'yes'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SRT_OVERRIDE: ${{ inputs.srt }}
         run: |
           set -euo pipefail
           TAG=$(jq -r '.jobs[0].release_tag' queue.json)
@@ -58,15 +63,24 @@ jobs:
             exit 0
           fi
 
-          jq -r '.jobs[0].srt' queue.json > captions.srt
+          # The app sends the timed captions along with the job. An explicit override -
+          # used when a finished episode is rendered again with corrected captions -
+          # takes their place.
+          if [ -n "${SRT_OVERRIDE:-}" ]; then
+            printf '%s' "$SRT_OVERRIDE" | base64 -d > captions.srt
+          else
+            jq -r '.jobs[0].srt' queue.json > captions.srt
+          fi
           curl -fsSL "$AUDIO" -o episode-audio.mp3
           curl -fsSL "$BACKGROUND" -o background.mp4
 
-          STYLE="FontName=Noto Sans Hebrew,FontSize=18,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=6,Shadow=0,Alignment=2,MarginV=100"
-          # MarginV counts subtitle units, not pixels: a frame is always 288 units tall, so
-          # the old 420 was taller than the frame and pushed the line out of the picture.
-          # This keeps the vertical captions in the lower third, above the Reels interface.
-          VSTYLE="FontName=Noto Sans Hebrew,FontSize=20,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=6,Shadow=0,Alignment=2,MarginV=100"
+          STYLE="FontName=Noto Sans Hebrew,FontSize=17,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=3,Shadow=0,Alignment=2,MarginV=45"
+          # Sizes are in subtitle units and a frame is always 288 units tall, so the drawn size
+          # grows with the frame: the vertical copy is 960 tall and drew every caption nearly
+          # twice as large as the 540-tall landscape one, which is why its lines ran past the
+          # narrower frame and were cut off. Each copy now carries its own size, small enough
+          # for a full line to fit inside it, and sits above the Reels interface.
+          VSTYLE="FontName=Noto Sans Hebrew,FontSize=9,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=100"
 
           # A modest frame with a hard compression pass: the picture is a soft looping
           # background under a caption, so a smaller frame and a higher CRF cost nothing
