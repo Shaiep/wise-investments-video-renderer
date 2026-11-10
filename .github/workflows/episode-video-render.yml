@@ -44,6 +44,9 @@ jobs:
         if: steps.queue.outputs.has_job == 'yes'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Without a checkout there is no repository on disk, so gh has to be told
+          # which one to publish the release to.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           J=$(jq -c '.jobs[0]' queue.json)
