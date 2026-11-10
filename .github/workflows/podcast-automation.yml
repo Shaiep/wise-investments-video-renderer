@@ -1,0 +1,51 @@
+# Podcast automation driver — the trigger that does not depend on Base44's scheduler.
+#
+# When the Base44 workspace runs out of integration credits its own scheduled
+# workflows pause. Production still works (scripts and voices use the app's own
+# Gemini key, the MP3 is encoded in-process, storage falls back to releases of
+# this repository), but something has to start it. This job is that starter: it
+# runs free on a public repository and calls the app's automationDriver endpoint.
+#
+# The driver starts nothing while the app reports "primary" mode, so this can run
+# around the clock; it only does work during an outage, and the app's own stage
+# locks make a second run harmless.
+#
+# Required repository secret: BASE44_AUTOMATION_TOKEN — a Base44 personal access
+# token of an app admin (Base44 dashboard -> API -> create token).
+
+name: Podcast automation driver
+
+on:
+  schedule:
+    - cron: '5,20,35,50 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: podcast-automation
+  cancel-in-progress: false
+
+jobs:
+  hebrew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Hebrew edition — advance the pipeline
+        run: |
+          curl -sS --max-time 280 -X POST \
+            "https://wise-investments-podcast.base44.app/functions/automationDriver" \
+            -H "Authorization: Bearer ${{ secrets.BASE44_AUTOMATION_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"language":"he","budget_ms":200000}' | head -c 6000
+
+  english:
+    needs: hebrew
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: English edition — advance the pipeline
+        run: |
+          curl -sS --max-time 280 -X POST \
+            "https://wise-investments-podcast.base44.app/functions/automationDriver" \
+            -H "Authorization: Bearer ${{ secrets.BASE44_AUTOMATION_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"language":"en","budget_ms":200000}' | head -c 6000
