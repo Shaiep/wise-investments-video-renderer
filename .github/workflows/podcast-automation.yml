@@ -10,8 +10,10 @@
 # around the clock; it only does work during an outage, and the app's own stage
 # locks make a second run harmless.
 #
-# Required repository secret: BASE44_AUTOMATION_TOKEN — a Base44 personal access
-# token of an app admin (Base44 dashboard -> API -> create token).
+# Required secret: BASE44_AUTOMATION_TOKEN — a Base44 personal access token of an
+# app admin (Base44 dashboard -> API -> create token), stored as a secret of the
+# Wise_Investment_Base environment (Settings -> Environments). Both jobs below
+# declare that environment, which is what makes its secret available here.
 
 name: Podcast automation driver
 
@@ -27,6 +29,7 @@ concurrency:
 jobs:
   hebrew:
     runs-on: ubuntu-latest
+    environment: Wise_Investment_Base
     timeout-minutes: 8
     steps:
       - name: Hebrew edition — advance the pipeline
@@ -40,6 +43,7 @@ jobs:
   english:
     needs: hebrew
     runs-on: ubuntu-latest
+    environment: Wise_Investment_Base
     timeout-minutes: 8
     steps:
       - name: English edition — advance the pipeline
