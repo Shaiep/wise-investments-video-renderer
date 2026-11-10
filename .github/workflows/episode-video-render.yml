@@ -1,18 +1,16 @@
 name: Episode video render
 
-# Renders episode videos on GitHub's own servers: the show's background looping
-# under the episode's audio, with the captions burned in, in 16:9 and 9:16.
-# The finished files are published as a release of this repository, and the app
-# collects them from there. Nothing runs on your computer.
+# Renders an episode as a branded video podcast on GitHub's own servers: the
+# show's background, a title card with the episode and its presenters, a live
+# audio spectrum, the burned-in captions, and a YouTube thumbnail — in 16:9 and
+# 9:16. The finished files are published as a release of this repository and the
+# app collects them from there. Nothing runs on your computer and nothing here
+# consumes Base44 integration credits.
 
 on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
-    inputs:
-      srt:
-        description: 'Optional captions (base64 SRT) that replace the copy the app sends with the job'
-        required: false
 
 permissions:
   contents: write
@@ -24,9 +22,9 @@ concurrency:
 jobs:
   render:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       APP: https://wise-investments-podcast.base44.app/functions/episodeVideoRender
-      GH_REPO: ${{ github.repository }}
     steps:
       - name: Ask the app which episode needs a video
         id: queue
@@ -34,67 +32,84 @@ jobs:
           set -euo pipefail
           curl -fsS -X POST "$APP" -H 'Content-Type: application/json' -d '{"action":"queue","limit":1}' -o queue.json
           cat queue.json
-          HAS_JOB=$(jq -r 'if (.jobs | length) > 0 then "yes" else "no" end' queue.json)
-          echo "has_job=$HAS_JOB" >> "$GITHUB_OUTPUT"
+          jq -r 'if (.jobs | length) > 0 then "yes" else "no" end | "has_job=" + .' queue.json >> "$GITHUB_OUTPUT"
 
-      # The renderer itself is not part of a fresh runner image and has to be
-      # installed with the Hebrew font the captions are drawn in.
       - name: Install ffmpeg and a Hebrew capable font
         if: steps.queue.outputs.has_job == 'yes'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-noto-core
+          sudo apt-get install -y -qq ffmpeg fonts-noto-core fontconfig
 
-      - name: Render the episode and publish the files
+      - name: Render the video, the thumbnail and the captions
         if: steps.queue.outputs.has_job == 'yes'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SRT_OVERRIDE: ${{ inputs.srt }}
         run: |
           set -euo pipefail
-          TAG=$(jq -r '.jobs[0].release_tag' queue.json)
-          TITLE=$(jq -r '.jobs[0].title' queue.json)
-          DURATION=$(jq -r '.jobs[0].duration_seconds' queue.json)
-          AUDIO=$(jq -r '.jobs[0].audio_url' queue.json)
-          BACKGROUND=$(jq -r '.jobs[0].background_url' queue.json)
+          J=$(jq -c '.jobs[0]' queue.json)
+          TAG=$(echo "$J" | jq -r '.release_tag')
+          TITLE=$(echo "$J" | jq -r '.title_plain // .title')
+          DUR=$(echo "$J" | jq -r '.duration_seconds')
+          INTRO=$(echo "$J" | jq -r '(.intro_seconds // 6) | tonumber | floor')
+          AUDIO=$(echo "$J" | jq -r '.audio_url')
+          BACKGROUND=$(echo "$J" | jq -r '.background_url')
+          LOGO=$(echo "$J" | jq -r '.logo_url // ""')
+          LANG_CODE=$(echo "$J" | jq -r '.language // "he"')
 
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "This episode already has a rendered release ($TAG) - nothing to do."
             exit 0
           fi
 
-          # The app sends the timed captions along with the job. An explicit override -
-          # used when a finished episode is rendered again with corrected captions -
-          # takes their place.
-          if [ -n "${SRT_OVERRIDE:-}" ]; then
-            printf '%s' "$SRT_OVERRIDE" | base64 -d > captions.srt
-          else
-            jq -r '.jobs[0].srt' queue.json > captions.srt
-          fi
+          # Every piece of text travels in its own file: a Hebrew title, a
+          # presenter name or a colon in a company name is then just text, never
+          # something the filter graph has to be escaped around.
+          echo "$J" | jq -r '.srt' > captions.srt
+          echo "$J" | jq -r '.brand_name // ""' > brand.txt
+          echo "$J" | jq -r '.episode_line // ""' > kick.txt
+          echo "$J" | jq -r '.title' > title.txt
+          echo "$J" | jq -r '.speakers // ""' > speakers.txt
+
           curl -fsSL "$AUDIO" -o episode-audio.mp3
           curl -fsSL "$BACKGROUND" -o background.mp4
 
-          STYLE="FontName=Noto Sans Hebrew,FontSize=17,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=3,Shadow=0,Alignment=2,MarginV=45"
-          # Sizes are in subtitle units and a frame is always 288 units tall, so the drawn size
-          # grows with the frame: the vertical copy is 960 tall and drew every caption nearly
-          # twice as large as the 540-tall landscape one, which is why its lines ran past the
-          # narrower frame and were cut off. Each copy now carries its own size, small enough
-          # for a full line to fit inside it, and sits above the Reels interface.
-          VSTYLE="FontName=Noto Sans Hebrew,FontSize=9,PrimaryColour=&H00FFFFFF,BackColour=&HB4000000,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=100"
+          FONT=$(fc-match -f '%{file}' 'Noto Sans Hebrew')
+          echo "Hebrew font: $FONT"
+          FADEOUT=$(awk -v d="$DUR" 'BEGIN { printf "%.2f", (d > 3 ? d - 1.5 : 0) }')
 
-          # A modest frame with a hard compression pass: the picture is a soft looping
-          # background under a caption, so a smaller frame and a higher CRF cost nothing
-          # the viewer can see and cut the file to a fraction of its size — which is what
-          # the platforms fetch and what the site serves.
-          ffmpeg -y -stream_loop -1 -i background.mp4 -i episode-audio.mp3 \
-            -filter_complex "[0:v]scale=960:540:force_original_aspect_ratio=increase,crop=960:540,setsar=1,fps=24,subtitles=captions.srt:force_style='$STYLE'[v]" \
-            -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -crf 30 -maxrate 700k -bufsize 1400k -pix_fmt yuv420p -c:a aac -b:a 64k -ac 1 -ar 44100 -movflags +faststart landscape.mp4
+          # ---- the thumbnail YouTube shows in search and on the channel ----
+          ffmpeg -y -f lavfi -i "color=c=0x477980:s=1280x720" -frames:v 1 plate.jpg
+          if [ -n "$LOGO" ] && curl -fsSL "$LOGO" -o logo.jpg; then
+            ffmpeg -y -i plate.jpg -i logo.jpg -filter_complex "[1:v]scale=230:-1[lg];[0:v][lg]overlay=64:56[o]" -map "[o]" -frames:v 1 -q:v 2 plate-logo.jpg
+            mv plate-logo.jpg plate.jpg
+          fi
+          ffmpeg -y -i plate.jpg -filter_complex "[0:v]drawtext=fontfile=$FONT:textfile=kick.txt:fontcolor=0xE9C46A:fontsize=32:x=64:y=330,drawtext=fontfile=$FONT:textfile=title.txt:fontcolor=white:fontsize=56:line_spacing=14:x=64:y=386,drawbox=x=64:y=h-176:w=128:h=9:color=0xE9C46A:t=fill,drawtext=fontfile=$FONT:textfile=brand.txt:fontcolor=white@0.82:fontsize=28:x=64:y=h-130[v]" -map "[v]" -frames:v 1 -q:v 2 thumbnail.jpg
 
-          ffmpeg -y -stream_loop -1 -i background.mp4 -i episode-audio.mp3 \
-            -filter_complex "[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,setsar=1,fps=24,subtitles=captions.srt:force_style='$VSTYLE'[v]" \
-            -map "[v]" -map 1:a -t "$DURATION" -c:v libx264 -preset veryfast -crf 30 -maxrate 800k -bufsize 1600k -pix_fmt yuv420p -c:a aac -b:a 64k -ac 1 -ar 44100 -movflags +faststart vertical.mp4
+          # ---- the two video shapes ----
+          # A caption is at most two short lines and both copies burn the same
+          # file, so each shape carries its own size: subtitle sizes are read in
+          # script units against a 288-unit-tall frame, so the drawn size follows
+          # the frame height, and a line always fits inside its own frame.
+          STYLE="FontName=Noto Sans Hebrew,FontSize=17,PrimaryColour=&H00FFFFFF,BackColour=&HBB000000,BorderStyle=3,Outline=3,Shadow=0,Alignment=2,MarginV=26"
+          # The vertical copy is watched inside Reels and Stories, whose interface
+          # covers the bottom of the frame, so its captions and its spectrum sit
+          # well above it in the part that always stays visible.
+          VSTYLE="FontName=Noto Sans Hebrew,FontSize=10,PrimaryColour=&H00FFFFFF,BackColour=&HBB000000,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=250"
 
-          gh release create "$TAG" landscape.mp4 vertical.mp4 captions.srt \
+          FC="[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,setsar=1,fps=24[bg];[1:a]asplit=2[an][av];[av]showwaves=s=1280x110:mode=cline:rate=24:colors=0xE9C46A,format=yuva420p,colorkey=0x000000:0.12:0.08,colorchannelmixer=aa=0.85[wave];[bg][wave]overlay=0:576:shortest=1[comp];[comp]drawbox=x=0:y=0:w=iw:h=ih:color=0x0B2226@0.62:t=fill:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=brand.txt:fontcolor=white:fontsize=30:x=(w-text_w)/2:y=168:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=kick.txt:fontcolor=0xE9C46A:fontsize=26:x=(w-text_w)/2:y=220:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=title.txt:fontcolor=white:fontsize=46:line_spacing=14:x=(w-text_w)/2:y=(h-text_h)/2-30:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=speakers.txt:fontcolor=white@0.88:fontsize=26:x=(w-text_w)/2:y=(h+text_h)/2+90:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=brand.txt:fontcolor=white@0.65:fontsize=22:x=40:y=34:enable='gte(t,$INTRO)',subtitles=captions.srt:force_style='$STYLE',fade=t=in:st=0:d=1.5,fade=t=out:st=$FADEOUT:d=1.5[v]"
+          FFMPEG_IN="-stream_loop -1 -i background.mp4 -i episode-audio.mp3"
+          ffmpeg -y $FFMPEG_IN -filter_complex "$FC" -map "[v]" -map "[an]" -t "$DUR" -c:v libx264 -preset veryfast -crf 28 -maxrate 1300k -bufsize 2600k -pix_fmt yuv420p -c:a aac -b:a 96k -ac 1 -ar 44100 -movflags +faststart landscape.mp4
+
+          FCV="[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,setsar=1,fps=24[bg];[1:a]asplit=2[an][av];[av]showwaves=s=540x90:mode=cline:rate=24:colors=0xE9C46A,format=yuva420p,colorkey=0x000000:0.12:0.08,colorchannelmixer=aa=0.85[wave];[bg][wave]overlay=0:604:shortest=1[comp];[comp]drawbox=x=0:y=0:w=iw:h=ih:color=0x0B2226@0.62:t=fill:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=brand.txt:fontcolor=white:fontsize=22:x=(w-text_w)/2:y=250:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=kick.txt:fontcolor=0xE9C46A:fontsize=19:x=(w-text_w)/2:y=292:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=title.txt:fontcolor=white:fontsize=30:line_spacing=10:fix_bounds=true:x=(w-text_w)/2:y=(h-text_h)/2-20:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=speakers.txt:fontcolor=white@0.88:fontsize=18:x=(w-text_w)/2:y=(h+text_h)/2+80:enable='between(t,0,$INTRO)',drawtext=fontfile=$FONT:textfile=brand.txt:fontcolor=white@0.6:fontsize=15:x=24:y=22:enable='gte(t,$INTRO)',subtitles=captions.srt:force_style='$VSTYLE',fade=t=in:st=0:d=1.5,fade=t=out:st=$FADEOUT:d=1.5[v]"
+          ffmpeg -y $FFMPEG_IN -filter_complex "$FCV" -map "[v]" -map "[an]" -t "$DUR" -c:v libx264 -preset veryfast -crf 30 -maxrate 900k -bufsize 1800k -pix_fmt yuv420p -c:a aac -b:a 64k -ac 1 -ar 44100 -movflags +faststart vertical.mp4
+
+          # Nothing is published unless every file a viewer or a network will
+          # fetch is really there and really has content.
+          for f in landscape.mp4 vertical.mp4 thumbnail.jpg captions.srt; do
+            test -s "$f" || { echo "Missing or empty: $f"; exit 1; }
+          done
+
+          gh release create "$TAG" landscape.mp4 vertical.mp4 captions.srt thumbnail.jpg \
             --title "$TITLE" \
-            --notes "Episode video: show background, episode audio, burned-in captions (16:9 and 9:16)."
+            --notes "Episode video ($LANG_CODE): show background, episode audio, title card, audio spectrum and burned-in captions (16:9 and 9:16), plus the thumbnail."
           echo "Published $TAG"
